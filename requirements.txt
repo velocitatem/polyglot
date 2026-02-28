@@ -1,0 +1,10 @@
+datacollective
+orjson
+zstandard
+tqdm
+transformers
+datasets
+accelerate
+peft
+torch
+huggingface_hub

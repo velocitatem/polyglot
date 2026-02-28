@@ -1,0 +1,39 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment and editor files
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ML/data artifacts
+ml/data/artifacts/
+ml/data/__pycache__/
+
+# Common large/binary data outputs
+*.sqlite
+*.db
+*.mp3
+*.wav
+*.flac
+*.zip
+*.tar
+*.gz
