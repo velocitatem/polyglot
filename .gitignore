@@ -37,3 +37,8 @@ ml/data/__pycache__/
 *.zip
 *.tar
 *.gz
+
+# Legacy data files (superseded by ETL pipeline)
+detailed.tsv
+parse_failures.txt
+datasets_by_language.json

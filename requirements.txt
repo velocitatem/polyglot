@@ -3,8 +3,8 @@ orjson
 zstandard
 tqdm
 transformers
-datasets
 accelerate
 peft
+bitsandbytes
 torch
 huggingface_hub

@@ -25,7 +25,7 @@ import webbrowser
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Literal
+from typing import Iterator, Literal
 
 import orjson
 import zstandard as zstd
@@ -105,13 +105,12 @@ def _dataset_url(did: str) -> str:
     return f"https://datacollective.mozillafoundation.org/datasets/{did}"
 
 
-def _zst_write_jsonl(path: Path, rows: Iterable[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    train_cctx = zstd.ZstdCompressor(level=10)
-    valid_cctx = zstd.ZstdCompressor(level=10)
-    with path.open("wb") as f, cctx.stream_writer(f) as w:
-        for r in rows:
-            w.write(orjson.dumps(r) + b"\n")
+def _dir_size_bytes(root: Path) -> int:
+    total = 0
+    for fp in root.rglob("*"):
+        if fp.is_file():
+            total += fp.stat().st_size
+    return total
 
 
 def _open_dedup_db(lang: str, track: str) -> sqlite3.Connection:
@@ -195,7 +194,13 @@ def list_cmd(bins: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def download_cmd(bins: Path, limit: int, lang: str | None, track: str | None) -> None:
+def download_cmd(
+    bins: Path,
+    limit: int,
+    lang: str | None,
+    track: str | None,
+    max_total_gb: float | None = None,
+) -> None:
     """Download raw archives from MDC, respecting a daily cap via LIMIT."""
     _ensure_dirs()
     b = json.loads(bins.read_text(encoding="utf-8"))
@@ -209,9 +214,18 @@ def download_cmd(bins: Path, limit: int, lang: str | None, track: str | None) ->
             todo.extend(ids)
 
     done = 0
+    cap_bytes = int(max_total_gb * (1024**3)) if max_total_gb is not None else None
     for did in todo:
         if done >= limit:
             break
+        if cap_bytes is not None:
+            current = _dir_size_bytes(RAW)
+            if current >= cap_bytes:
+                print(
+                    "Stopped by size cap: "
+                    f"raw={current / (1024**3):.2f}GiB cap={max_total_gb:.2f}GiB"
+                )
+                break
         sentinel = RAW / did / ".done"
         if sentinel.exists():
             continue
@@ -242,10 +256,15 @@ def _extract_archive(archive: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if archive.suffix.lower() == ".zip":
         with zipfile.ZipFile(archive) as zf:
+            # Validate member paths to prevent path traversal (CVE-2007-4559)
+            for member in zf.namelist():
+                target = (out_dir / member).resolve()
+                if not str(target).startswith(str(out_dir.resolve())):
+                    raise ValueError(f"Zip path traversal blocked: {member}")
             zf.extractall(out_dir)
         return
     with tarfile.open(archive, "r:*") as tf:
-        tf.extractall(out_dir)
+        tf.extractall(out_dir, filter="data")
 
 
 def _iter_txt_docs(p: Path) -> Iterator[str]:
@@ -617,6 +636,7 @@ def main() -> None:
     p.add_argument("--limit", type=int, required=True)
     p.add_argument("--lang", type=str, default=None)
     p.add_argument("--track", type=str, default=None)
+    p.add_argument("--max-total-gb", type=float, default=None)
 
     p = sp.add_parser("build", help="Normalize and shard into train/valid")
     p.add_argument("--bins", type=Path, required=True)
@@ -642,7 +662,7 @@ def main() -> None:
     elif a.cmd == "list":
         list_cmd(a.bins)
     elif a.cmd == "download":
-        download_cmd(a.bins, a.limit, a.lang, a.track)
+        download_cmd(a.bins, a.limit, a.lang, a.track, a.max_total_gb)
     elif a.cmd == "build":
         build_cmd(a.bins, a.lang, a.track, a.valid_permille)
     elif a.cmd == "stats":
