@@ -43,10 +43,21 @@ TRAINING_DEFAULTS = {
     "max_steps": 5000,
     "warmup_steps": 200,
     "grad_accum": 16,
+    "per_device_batch_size": None,  # auto: 1 for GPU, 8 for TPU
     "r": 32,
     "alpha": 64,
     "dropout": 0.05,
     "load_in_4bit": True,
+}
+
+# TPU-optimized overrides — applied when --tpu is passed
+TRAINING_DEFAULTS_TPU = {
+    **TRAINING_DEFAULTS,
+    "load_in_4bit": False,  # no bitsandbytes on TPU
+    "per_device_batch_size": 8,  # TPU v3 has 16GB HBM per core
+    "grad_accum": 2,  # effective batch = 8 cores * 8 * 2 = 128
+    "dropout": 0.0,  # avoid non-deterministic dropout on XLA
+    "lr": 3e-4,  # slightly higher LR for larger effective batch
 }
 
 

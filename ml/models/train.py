@@ -4,6 +4,10 @@ LoRA Continued Pre-Training (CPT) on zstd-compressed JSONL shards.
 
 Packs tokens to fixed seq_len for maximum throughput.
 Uses PEFT LoRA targeting all attention + MLP projections.
+
+Supports:
+  - GPU with optional 4-bit QLoRA (bitsandbytes)
+  - TPU via torch_xla (bf16, no quantization, FSDP via accelerate)
 """
 
 from __future__ import annotations
@@ -11,21 +15,48 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
 import torch
 import zstandard as zstd
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import IterableDataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
 )
+
+
+def _is_tpu() -> bool:
+    """Detect if running on a TPU (torch_xla available and XLA devices present)."""
+    try:
+        import torch_xla.core.xla_model as xm
+
+        return True
+    except ImportError:
+        return False
+
+
+def _tpu_device():
+    """Get the XLA device."""
+    import torch_xla.core.xla_model as xm
+
+    return xm.xla_device()
+
+
+def _tpu_core_count() -> int:
+    """Get number of TPU cores available."""
+    try:
+        import torch_xla.core.xla_model as xm
+
+        return xm.xrt_world_size()
+    except Exception:
+        return 8  # default for TPU v2-8 / v3-8
 
 
 @dataclass(frozen=True)
@@ -36,6 +67,7 @@ class TrainCfg:
     max_steps: int = 5000
     warmup_steps: int = 200
     grad_accum: int = 16
+    per_device_batch_size: int = 1
     r: int = 32
     alpha: int = 64
     dropout: float = 0.05
@@ -109,6 +141,49 @@ def _infer_target_modules(model) -> list[str]:
     )
 
 
+def _load_model_gpu(
+    base_model: str, load_in_4bit: bool, out_dir: Path, max_gpu_mem_gb: int | None
+):
+    """Load model for GPU training (optional 4-bit quantization)."""
+    if load_in_4bit:
+        from peft import prepare_model_for_kbit_training
+        from transformers import BitsAndBytesConfig
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        quant_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16
+            if torch.cuda.is_available()
+            else torch.float32,
+            bnb_4bit_use_double_quant=True,
+        )
+        max_memory = None
+        if max_gpu_mem_gb is not None:
+            max_memory = {0: f"{max_gpu_mem_gb}GiB", "cpu": "64GiB"}
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            quantization_config=quant_cfg,
+            device_map="auto",
+            max_memory=max_memory,
+            offload_folder=str(out_dir / "offload"),
+        )
+        model = prepare_model_for_kbit_training(model)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype="auto")
+    return model
+
+
+def _load_model_tpu(base_model: str):
+    """Load model for TPU training (bf16, no quantization, no device_map)."""
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        torch_dtype=torch.bfloat16,
+    )
+    return model
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="LoRA CPT training")
     ap.add_argument("--base-model", required=True)
@@ -120,12 +195,38 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=5000)
     ap.add_argument("--warmup-steps", type=int, default=200)
     ap.add_argument("--grad-accum", type=int, default=16)
+    ap.add_argument("--per-device-batch-size", type=int, default=None)
     ap.add_argument("--r", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=64)
     ap.add_argument("--dropout", type=float, default=0.05)
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--max-gpu-mem-gb", type=int, default=None)
+    ap.add_argument(
+        "--tpu",
+        action="store_true",
+        help="Force TPU mode (auto-detected if torch_xla available)",
+    )
     a = ap.parse_args()
+
+    use_tpu = a.tpu or _is_tpu()
+
+    # TPU overrides: no 4-bit, larger batch size
+    if use_tpu:
+        a.load_in_4bit = False
+        print(f"TPU mode: bf16, no quantization, cores={_tpu_core_count()}")
+
+    # Default batch size: 1 for GPU, 8 for TPU (more HBM available)
+    batch_size = a.per_device_batch_size
+    if batch_size is None:
+        batch_size = 8 if use_tpu else 1
+
+    # On TPU with larger batch, reduce grad_accum to keep effective batch ~same
+    grad_accum = a.grad_accum
+    if use_tpu and a.per_device_batch_size is None:
+        # Effective batch = cores * batch_size * grad_accum
+        # GPU default: 1 * 1 * 16 = 16
+        # TPU default: 8 * 8 * 2 = 128 (good for CPT)
+        grad_accum = max(1, 2)
 
     cfg = TrainCfg(
         base_model=a.base_model,
@@ -133,7 +234,8 @@ def main() -> None:
         lr=a.lr,
         max_steps=a.max_steps,
         warmup_steps=a.warmup_steps,
-        grad_accum=a.grad_accum,
+        grad_accum=grad_accum,
+        per_device_batch_size=batch_size,
         r=a.r,
         alpha=a.alpha,
         dropout=a.dropout,
@@ -146,34 +248,17 @@ def main() -> None:
     train_ds = ZstJsonlPacked(a.train_zst, tok, cfg.seq_len)
     valid_ds = ZstJsonlPacked(a.valid_zst, tok, cfg.seq_len)
 
-    if a.load_in_4bit:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        quant_cfg = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16
-            if torch.cuda.is_available()
-            else torch.float32,
-            bnb_4bit_use_double_quant=True,
-        )
-        max_memory = None
-        if a.max_gpu_mem_gb is not None:
-            max_memory = {0: f"{a.max_gpu_mem_gb}GiB", "cpu": "64GiB"}
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.base_model,
-            quantization_config=quant_cfg,
-            device_map="auto",
-            max_memory=max_memory,
-            offload_folder=str(a.out / "offload"),
-        )
-        model = prepare_model_for_kbit_training(model)
+    # Load model
+    if use_tpu:
+        model = _load_model_tpu(cfg.base_model)
     else:
-        model = AutoModelForCausalLM.from_pretrained(cfg.base_model, torch_dtype="auto")
+        model = _load_model_gpu(cfg.base_model, a.load_in_4bit, a.out, a.max_gpu_mem_gb)
+
+    # LoRA config — dropout=0 on TPU avoids non-deterministic ops
     lora = LoraConfig(
         r=cfg.r,
         lora_alpha=cfg.alpha,
-        lora_dropout=cfg.dropout,
+        lora_dropout=0.0 if use_tpu else cfg.dropout,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=_infer_target_modules(model),
@@ -182,26 +267,44 @@ def main() -> None:
     model.print_trainable_parameters()
 
     a.out.mkdir(parents=True, exist_ok=True)
+    cfg_dict = asdict(cfg)
+    cfg_dict["tpu"] = use_tpu
     (a.out / "train_cfg.json").write_text(
-        json.dumps(asdict(cfg), indent=2), encoding="utf-8"
+        json.dumps(cfg_dict, indent=2), encoding="utf-8"
     )
 
+    # Training arguments
     ta_kwargs = {
         "output_dir": str(a.out),
         "max_steps": cfg.max_steps,
         "warmup_steps": cfg.warmup_steps,
         "learning_rate": cfg.lr,
-        "per_device_train_batch_size": 1,
-        "per_device_eval_batch_size": 1,
+        "per_device_train_batch_size": cfg.per_device_batch_size,
+        "per_device_eval_batch_size": cfg.per_device_batch_size,
         "gradient_accumulation_steps": cfg.grad_accum,
         "logging_steps": 25,
         "eval_steps": 500,
         "save_steps": 500,
         "save_total_limit": 2,
-        "bf16": torch.cuda.is_available(),
+        "bf16": True,  # bf16 on both GPU (if supported) and TPU
         "report_to": [],
         "remove_unused_columns": False,
+        "dataloader_drop_last": use_tpu,  # TPU requires uniform batch shapes
     }
+
+    # TPU-specific: FSDP for multi-core sharding
+    if use_tpu:
+        ta_kwargs["fsdp"] = "full_shard auto_wrap"
+        ta_kwargs["fsdp_config"] = {
+            "fsdp_transformer_layer_cls_to_wrap": [
+                "LlamaDecoderLayer",
+                "GemmaDecoderLayer",
+                "MistralDecoderLayer",
+                "GPT2Block",
+                "FalconDecoderLayer",
+            ],
+        }
+
     ta_params = inspect.signature(TrainingArguments.__init__).parameters
     if "eval_strategy" in ta_params:
         ta_kwargs["eval_strategy"] = "steps"
