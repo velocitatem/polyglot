@@ -23,6 +23,7 @@ TPU ?=
 
 # TPU flag passthrough
 TPU_FLAG = $(if $(filter 1 true yes,$(TPU)),--tpu,)
+DEPS_TARGET = $(if $(filter 1 true yes,$(TPU)),deps-tpu,deps)
 
 .PHONY: venv deps deps-tpu env-check \
         mdc-meta mdc-bins \
@@ -66,11 +67,11 @@ build: deps
 	@test -n "$(L)" || (echo "L is required"; exit 1)
 	$(PY) -m polyglot build --lang $(L)
 
-train: deps
+train: $(DEPS_TARGET)
 	@test -n "$(L)" || (echo "L is required"; exit 1)
 	$(PY) -m polyglot train --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),) $(TPU_FLAG)
 
-eval: deps
+eval: $(DEPS_TARGET)
 	@test -n "$(L)" || (echo "L is required"; exit 1)
 	$(PY) -m polyglot eval --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),) $(TPU_FLAG)
 

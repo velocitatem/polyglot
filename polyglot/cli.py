@@ -86,6 +86,8 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     cfg = LangConfig.load(args.lang)
     use_tpu = getattr(args, "tpu", False)
+    if use_tpu:
+        _ensure_tpu_runtime()
 
     # On TPU, override training params with TPU defaults (unless user set them in lang.yaml)
     def _param(key: str):
@@ -127,33 +129,39 @@ def cmd_train(args: argparse.Namespace) -> None:
     cmd = [
         accel,
         "launch",
-        "-m",
-        "ml.models.train",
-        "--base-model",
-        base_model,
-        "--train-zst",
-        str(cfg.train_shard),
-        "--valid-zst",
-        str(cfg.valid_shard),
-        "--out",
-        str(run_dir),
-        "--seq-len",
-        str(_param("seq_len")),
-        "--lr",
-        str(_param("lr")),
-        "--max-steps",
-        str(_param("max_steps")),
-        "--warmup-steps",
-        str(_param("warmup_steps")),
-        "--grad-accum",
-        str(_param("grad_accum")),
-        "--r",
-        str(_param("r")),
-        "--alpha",
-        str(_param("alpha")),
-        "--dropout",
-        str(_param("dropout")),
     ]
+    if use_tpu:
+        cmd.extend(["--tpu", "--num_processes", str(_tpu_core_count())])
+    cmd.extend(
+        [
+            "-m",
+            "ml.models.train",
+            "--base-model",
+            base_model,
+            "--train-zst",
+            str(cfg.train_shard),
+            "--valid-zst",
+            str(cfg.valid_shard),
+            "--out",
+            str(run_dir),
+            "--seq-len",
+            str(_param("seq_len")),
+            "--lr",
+            str(_param("lr")),
+            "--max-steps",
+            str(_param("max_steps")),
+            "--warmup-steps",
+            str(_param("warmup_steps")),
+            "--grad-accum",
+            str(_param("grad_accum")),
+            "--r",
+            str(_param("r")),
+            "--alpha",
+            str(_param("alpha")),
+            "--dropout",
+            str(_param("dropout")),
+        ]
+    )
 
     batch_size = _param("per_device_batch_size")
     if batch_size is not None:
@@ -175,6 +183,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
 
     cfg = LangConfig.load(args.lang)
     use_tpu = getattr(args, "tpu", False)
+    if use_tpu:
+        _ensure_tpu_runtime()
     base_model = args.base_model or cfg.training_param("base_model")
     run_tag = args.run_tag or _latest_run(cfg)
     if not run_tag:
@@ -413,6 +423,37 @@ def _accelerate_executable() -> str:
     if venv_accelerate.exists():
         return str(venv_accelerate)
     return "accelerate"
+
+
+def _tpu_core_count() -> int:
+    try:
+        import torch_xla.core.xla_model as xm
+
+        n = xm.xrt_world_size()
+        return n if isinstance(n, int) and n > 0 else 8
+    except Exception:
+        return 8
+
+
+def _ensure_tpu_runtime() -> None:
+    """Fail fast with actionable TPU runtime diagnostics."""
+    try:
+        import torch_xla  # noqa: F401
+    except Exception as e:
+        msg = str(e)
+        print("TPU runtime check failed: could not import torch_xla.")
+        print(f"Error: {msg}")
+        if "GLIBC_" in msg:
+            print(
+                "Detected a GLIBC mismatch between this VM and installed torch_xla wheel."
+            )
+            print("Fix on TPU VM:")
+            print("  1) make deps")
+            print("  2) make deps-tpu")
+            print(
+                "  3) If it still fails, install a torch/torch_xla pair built for your VM image"
+            )
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
