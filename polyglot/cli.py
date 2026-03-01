@@ -145,8 +145,12 @@ def cmd_train(args: argparse.Namespace) -> None:
                 "--tpu",
                 "--num_processes",
                 str(_tpu_core_count()),
+                "--num_machines",
+                "1",
                 "--mixed_precision",
                 "bf16",
+                "--dynamo_backend",
+                "no",
                 "--main_training_function",
                 "main",
             ]

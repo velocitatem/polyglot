@@ -321,10 +321,13 @@ def main() -> None:
         "report_to": [],
         "remove_unused_columns": False,
         "dataloader_drop_last": use_tpu,  # TPU requires uniform batch shapes
+        "dataloader_pin_memory": not use_tpu,
     }
 
+    # torch.utils.checkpoint currently expects torch.xla attribute in this stack,
+    # which is not available and crashes on TPU. Keep it off by default.
     if use_tpu:
-        ta_kwargs["gradient_checkpointing"] = True
+        ta_kwargs["gradient_checkpointing"] = False
 
     ta_params = inspect.signature(TrainingArguments.__init__).parameters
     if "eval_strategy" in ta_params:
