@@ -19,8 +19,12 @@ MAX_GB ?=
 BASE_MODEL ?=
 RUN_TAG ?=
 HF_REPO ?=
+TPU ?=
 
-.PHONY: venv deps env-check \
+# TPU flag passthrough
+TPU_FLAG = $(if $(filter 1 true yes,$(TPU)),--tpu,)
+
+.PHONY: venv deps deps-tpu env-check \
         mdc-meta mdc-bins \
         init init-all download build train eval status publish \
         run viz clean
@@ -32,6 +36,9 @@ venv:
 deps: venv
 	$(PIP) install -U pip
 	$(PIP) install -r requirements.txt
+
+deps-tpu: deps
+	$(PIP) install -r requirements-tpu.txt
 
 env-check:
 	@test -n "$$MDC_API_KEY" || (echo "MDC_API_KEY is not set"; exit 1)
@@ -61,11 +68,11 @@ build: deps
 
 train: deps
 	@test -n "$(L)" || (echo "L is required"; exit 1)
-	$(PY) -m polyglot train --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
+	$(PY) -m polyglot train --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),) $(TPU_FLAG)
 
 eval: deps
 	@test -n "$(L)" || (echo "L is required"; exit 1)
-	$(PY) -m polyglot eval --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
+	$(PY) -m polyglot eval --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),) $(TPU_FLAG)
 
 status: deps
 	$(PY) -m polyglot status $(if $(L),--lang $(L),)

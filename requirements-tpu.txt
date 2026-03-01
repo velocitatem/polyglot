@@ -1,0 +1,17 @@
+# TPU-specific requirements
+# Install AFTER the base requirements.txt
+#
+# On a TPU VM (e.g., Google Cloud TPU v2-8 / v3-8 / v4-8):
+#   pip install -r requirements.txt
+#   pip install -r requirements-tpu.txt
+#
+# For TPU v4+ with tpu-vm runtime:
+#   The torch and torch_xla versions must match exactly.
+#   Check https://github.com/pytorch/xla#getting-started for the right combo.
+
+# PyTorch/XLA — must match the torch version in requirements.txt
+torch_xla[tpu]
+
+# libtpu is auto-installed by torch_xla[tpu] on GCE TPU VMs.
+# If not, install manually:
+#   pip install libtpu-nightly -f https://storage.googleapis.com/libtpu-releases/index.html

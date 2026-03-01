@@ -58,9 +58,22 @@ def cmd_build(args: argparse.Namespace) -> None:
 def cmd_train(args: argparse.Namespace) -> None:
     """Run LoRA CPT training for a language."""
     import subprocess
+    from polyglot.config import TRAINING_DEFAULTS_TPU
 
     cfg = LangConfig.load(args.lang)
-    base_model = args.base_model or cfg.training_param("base_model")
+    use_tpu = getattr(args, "tpu", False)
+
+    # On TPU, override training params with TPU defaults (unless user set them in lang.yaml)
+    def _param(key: str):
+        """Get param: lang.yaml override > TPU defaults (if --tpu) > normal defaults."""
+        # If explicitly set in lang.yaml training section, use it
+        if key in cfg.training:
+            return cfg.training[key]
+        if use_tpu:
+            return TRAINING_DEFAULTS_TPU.get(key, cfg.training_param(key))
+        return cfg.training_param(key)
+
+    base_model = args.base_model or _param("base_model")
     run_tag = args.run_tag or _auto_run_tag()
     run_dir = cfg.runs_dir / run_tag
 
@@ -84,26 +97,33 @@ def cmd_train(args: argparse.Namespace) -> None:
         "--out",
         str(run_dir),
         "--seq-len",
-        str(cfg.training_param("seq_len")),
+        str(_param("seq_len")),
         "--lr",
-        str(cfg.training_param("lr")),
+        str(_param("lr")),
         "--max-steps",
-        str(cfg.training_param("max_steps")),
+        str(_param("max_steps")),
         "--warmup-steps",
-        str(cfg.training_param("warmup_steps")),
+        str(_param("warmup_steps")),
         "--grad-accum",
-        str(cfg.training_param("grad_accum")),
+        str(_param("grad_accum")),
         "--r",
-        str(cfg.training_param("r")),
+        str(_param("r")),
         "--alpha",
-        str(cfg.training_param("alpha")),
+        str(_param("alpha")),
         "--dropout",
-        str(cfg.training_param("dropout")),
+        str(_param("dropout")),
     ]
-    if cfg.training_param("load_in_4bit"):
+
+    batch_size = _param("per_device_batch_size")
+    if batch_size is not None:
+        cmd.extend(["--per-device-batch-size", str(batch_size)])
+
+    if use_tpu:
+        cmd.append("--tpu")
+    elif _param("load_in_4bit"):
         cmd.append("--load-in-4bit")
 
-    print(f"Training {cfg.language} → {run_dir}")
+    print(f"Training {cfg.language} → {run_dir}" + (" [TPU]" if use_tpu else ""))
     subprocess.run(cmd, check=True)
 
 
@@ -112,6 +132,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
     import subprocess
 
     cfg = LangConfig.load(args.lang)
+    use_tpu = getattr(args, "tpu", False)
     base_model = args.base_model or cfg.training_param("base_model")
     run_tag = args.run_tag or _latest_run(cfg)
     if not run_tag:
@@ -132,10 +153,12 @@ def cmd_eval(args: argparse.Namespace) -> None:
         "--out",
         str(run_dir / "eval.json"),
     ]
-    if cfg.training_param("load_in_4bit"):
+    if use_tpu:
+        cmd.append("--tpu")
+    elif cfg.training_param("load_in_4bit"):
         cmd.append("--load-in-4bit")
 
-    print(f"Evaluating {cfg.language} run={run_tag}")
+    print(f"Evaluating {cfg.language} run={run_tag}" + (" [TPU]" if use_tpu else ""))
     subprocess.run(cmd, check=True)
 
 
@@ -288,12 +311,16 @@ def main() -> None:
     p.add_argument("--lang", type=str, required=True)
     p.add_argument("--base-model", type=str, default=None)
     p.add_argument("--run-tag", type=str, default=None)
+    p.add_argument(
+        "--tpu", action="store_true", help="Use TPU (bf16, no quantization, FSDP)"
+    )
 
     # eval
     p = sp.add_parser("eval", help="Evaluate trained adapter")
     p.add_argument("--lang", type=str, required=True)
     p.add_argument("--base-model", type=str, default=None)
     p.add_argument("--run-tag", type=str, default=None)
+    p.add_argument("--tpu", action="store_true", help="Use TPU for evaluation")
 
     # status
     p = sp.add_parser("status", help="Show pipeline status")
