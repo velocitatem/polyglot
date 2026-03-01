@@ -24,12 +24,16 @@ dist/
 *.swp
 *.swo
 
-# ML/data artifacts
+# ML/data artifacts (legacy ETL)
 ml/data/artifacts/
-ml/data/__pycache__/
+
+# Per-language heavy artifacts (data, runs, dedup DBs)
+# lang.yaml and sources/*.jsonl ARE tracked — they're the contribution point
+langs/*/data/
+langs/*/runs/
+*.sqlite
 
 # Common large/binary data outputs
-*.sqlite
 *.db
 *.mp3
 *.wav
@@ -38,7 +42,10 @@ ml/data/__pycache__/
 *.tar
 *.gz
 
-# Legacy data files (superseded by ETL pipeline)
+# Generated outputs
+lang_coverage.png
+
+# Legacy data files
 detailed.tsv
 parse_failures.txt
 datasets_by_language.json

@@ -1,38 +1,31 @@
 SHELL := /bin/bash
 
-PY ?= .venv/bin/python
+PY  ?= .venv/bin/python
 PIP ?= .venv/bin/pip
-ACC ?= .venv/bin/accelerate
 
-DATASETS_TXT ?= datasets.txt
-ART ?= ml/data/artifacts
-META_JSONL ?= $(ART)/manifests/datasets_meta.jsonl
-BINS_JSON ?= $(ART)/manifests/bins.json
-COVERAGE_OUT ?= $(ART)/manifests/coverage.json
-COVERAGE_BASE_MODEL ?=
-COVERAGE_TRACK ?=
-PLAN_JSON ?= $(ART)/manifests/train_plan.json
-PLAN_SH ?= $(ART)/manifests/train_plan.sh
-PLAN_TRACK ?=
-PLAN_MIN_TRAIN_DOCS ?= 200
-PLAN_MIN_VALID_DOCS ?= 10
-PLAN_SKIP_TRAINED ?= 1
-PLAN_RUN_TAG_PREFIX ?= all
-PLAN_HF_REPO_PREFIX ?=
+# Prevent system LANG (locale) from leaking into our L variable
+unexport LANG
 
-LANG ?=
-TRACK ?= cc0_pd
-LIMIT ?= 20
-MAX_TOTAL_GB ?=
+# Legacy ETL paths (used by init to bootstrap from MDC metadata)
+ART            ?= ml/data/artifacts
+DATASETS_TXT   ?= datasets.txt
+META_JSONL     ?= $(ART)/manifests/datasets_meta.jsonl
+BINS_JSON      ?= $(ART)/manifests/bins.json
 
-BASE_MODEL ?= mistralai/Ministral-3-14B-Base-2512
-RUN_TAG ?= $(shell date -u +%Y%m%dT%H%M%SZ)
+# Per-language parameters — use L= for brevity (e.g., make status L=fi)
+L ?=
+LIMIT ?= 100
+MAX_GB ?=
+BASE_MODEL ?=
+RUN_TAG ?=
+HF_REPO ?=
 
-NORM_DIR = $(ART)/normalized/lang=$(LANG)/track=$(TRACK)
-RUN_DIR = $(ART)/runs/base=$(subst /,_,$(BASE_MODEL))/lang=$(LANG)/track=$(TRACK)/$(RUN_TAG)
+.PHONY: venv deps env-check \
+        mdc-meta mdc-bins \
+        init init-all download build train eval status publish \
+        run viz clean
 
-.PHONY: venv deps env-check mdc-meta mdc-bins mdc-download data stats coverage plan-all pipeline-all train eval publish list-bins clean
-
+# ── Setup ─────────────────────────────────────────────────────────
 venv:
 	python -m venv .venv
 
@@ -43,50 +36,51 @@ deps: venv
 env-check:
 	@test -n "$$MDC_API_KEY" || (echo "MDC_API_KEY is not set"; exit 1)
 
+# ── MDC metadata (run once to bootstrap) ──────────────────────────
 mdc-meta: deps env-check
 	$(PY) -m ml.data.etl meta --datasets-txt $(DATASETS_TXT) --out $(META_JSONL)
 
 mdc-bins: deps
 	$(PY) -m ml.data.etl bins --meta $(META_JSONL) --out $(BINS_JSON)
 
-mdc-download: deps env-check
-	$(PY) -m ml.data.etl download --bins $(BINS_JSON) --limit $(LIMIT) $(if $(LANG),--lang $(LANG),) $(if $(TRACK),--track $(TRACK),) $(if $(MAX_TOTAL_GB),--max-total-gb $(MAX_TOTAL_GB),)
+# ── Per-language pipeline ─────────────────────────────────────────
+init: deps
+	@test -n "$(L)" || (echo "L is required. Use init-all for all languages."; exit 1)
+	$(PY) -m polyglot init --lang $(L) --bins $(BINS_JSON)
 
-data: deps
-	@test -n "$(LANG)" || (echo "LANG is required (e.g., LANG=fi)"; exit 1)
-	$(PY) -m ml.data.etl build --bins $(BINS_JSON) --lang $(LANG) --track $(TRACK)
+init-all: deps
+	$(PY) -m polyglot init --all --bins $(BINS_JSON)
 
-stats: deps
-	@test -n "$(LANG)" || (echo "LANG is required"; exit 1)
-	$(PY) -m ml.data.etl stats --lang $(LANG) --track $(TRACK)
+download: deps env-check
+	@test -n "$(L)" || (echo "L is required (e.g., L=fi)"; exit 1)
+	$(PY) -m polyglot download --lang $(L) $(if $(LIMIT),--limit $(LIMIT),) $(if $(MAX_GB),--max-gb $(MAX_GB),)
 
-coverage: deps
-	$(PY) -m ml.data.etl coverage --out $(COVERAGE_OUT) $(if $(wildcard $(BINS_JSON)),--bins $(BINS_JSON),) $(if $(COVERAGE_BASE_MODEL),--base-model $(COVERAGE_BASE_MODEL),) $(if $(COVERAGE_TRACK),--track $(COVERAGE_TRACK),)
-
-plan-all: deps
-	$(PY) -m ml.pipeline.plan --bins $(BINS_JSON) --coverage $(COVERAGE_OUT) --base-model $(BASE_MODEL) --out-json $(PLAN_JSON) --out-shell $(PLAN_SH) $(if $(PLAN_TRACK),--track $(PLAN_TRACK),) --min-train-docs $(PLAN_MIN_TRAIN_DOCS) --min-valid-docs $(PLAN_MIN_VALID_DOCS) --run-tag-prefix $(PLAN_RUN_TAG_PREFIX) $(if $(PLAN_HF_REPO_PREFIX),--hf-repo-prefix $(PLAN_HF_REPO_PREFIX),) $(if $(filter 1,$(PLAN_SKIP_TRAINED)),--skip-trained,)
-
-pipeline-all: mdc-meta mdc-bins coverage plan-all
+build: deps
+	@test -n "$(L)" || (echo "L is required"; exit 1)
+	$(PY) -m polyglot build --lang $(L)
 
 train: deps
-	@test -n "$(LANG)" || (echo "LANG is required"; exit 1)
-	@test -f "$(NORM_DIR)/train.jsonl.zst" || (echo "Missing train shards. Run: make data LANG=$(LANG) TRACK=$(TRACK)"; exit 1)
-	$(ACC) launch -m ml.models.train \
-		--base-model $(BASE_MODEL) \
-		--train-zst $(NORM_DIR)/train.jsonl.zst \
-		--valid-zst $(NORM_DIR)/valid.jsonl.zst \
-		--out $(RUN_DIR)
+	@test -n "$(L)" || (echo "L is required"; exit 1)
+	$(PY) -m polyglot train --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
 
 eval: deps
-	@test -n "$(LANG)" || (echo "LANG is required"; exit 1)
-	$(PY) -m ml.models.eval --base-model $(BASE_MODEL) --adapter $(RUN_DIR) --valid-zst $(NORM_DIR)/valid.jsonl.zst --out $(RUN_DIR)/eval.json
+	@test -n "$(L)" || (echo "L is required"; exit 1)
+	$(PY) -m polyglot eval --lang $(L) $(if $(BASE_MODEL),--base-model $(BASE_MODEL),) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
+
+status: deps
+	$(PY) -m polyglot status $(if $(L),--lang $(L),)
 
 publish: deps
-	@test -n "$(HF_REPO)" || (echo "HF_REPO is required (e.g., HF_REPO=myorg/ministral14b-lora-fi-cc0)"; exit 1)
-	$(PY) -m ml.models.publish --repo $(HF_REPO) --adapter $(RUN_DIR)
+	@test -n "$(L)" || (echo "L is required"; exit 1)
+	@test -n "$(HF_REPO)" || (echo "HF_REPO is required"; exit 1)
+	$(PY) -m polyglot publish --lang $(L) --hf-repo $(HF_REPO) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
 
-list-bins: deps
-	$(PY) -m ml.data.etl list --bins $(BINS_JSON)
+# ── Convenience ───────────────────────────────────────────────────
+run: download build train eval
+	@echo "Pipeline complete for $(L)"
+
+viz: deps
+	$(PY) -m ml.viz.lang_coverage --out lang_coverage.png
 
 clean:
-	rm -rf $(ART)/runs
+	rm -rf langs/*/runs

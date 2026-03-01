@@ -1,0 +1,24 @@
+language: ur
+name: Urdu
+sources:
+  mdc:
+  - id: cmhp3jurx00afmk07z5z4fktu
+    track: by_nc
+  - id: cmiq9o5rn004wns07zry0skak
+    track: by_nc
+  - id: cmiq9pmmx0050ns07s0vgvobm
+    track: by_nc
+  - id: cmj8u3pz600t9nxxbz9l2ck2n
+    track: other
+  custom: []
+training:
+  base_model: mistralai/Ministral-3-14B-Base-2512
+  seq_len: 2048
+  lr: 0.0002
+  max_steps: 5000
+  warmup_steps: 200
+  grad_accum: 16
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  load_in_4bit: true

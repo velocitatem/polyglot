@@ -2,6 +2,9 @@ datacollective
 orjson
 zstandard
 tqdm
+pyyaml
+langcodes[data]
+matplotlib
 transformers
 accelerate
 peft

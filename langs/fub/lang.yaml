@@ -1,0 +1,22 @@
+language: fub
+name: Adamawa Fulfulde
+sources:
+  mdc:
+  - id: cmhvzlidq0326mn07hk4do3pj
+    track: other
+  - id: cmj8u3p42008lnxxbhzxew2bv
+    track: other
+  - id: cml5asbhf009sme079y6sa9hm
+    track: other
+  custom: []
+training:
+  base_model: mistralai/Ministral-3-14B-Base-2512
+  seq_len: 2048
+  lr: 0.0002
+  max_steps: 5000
+  warmup_steps: 200
+  grad_accum: 16
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  load_in_4bit: true
