@@ -134,72 +134,90 @@ def cmd_train(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    accel = _accelerate_executable()
-    cmd = [
-        accel,
-        "launch",
+    train_args = [
+        "--base-model",
+        base_model,
+        "--train-zst",
+        str(cfg.train_shard),
+        "--valid-zst",
+        str(cfg.valid_shard),
+        "--out",
+        str(run_dir),
+        "--seq-len",
+        str(_param("seq_len")),
+        "--lr",
+        str(_param("lr")),
+        "--max-steps",
+        str(_param("max_steps")),
+        "--warmup-steps",
+        str(_param("warmup_steps")),
+        "--grad-accum",
+        str(_param("grad_accum")),
+        "--r",
+        str(_param("r")),
+        "--alpha",
+        str(_param("alpha")),
+        "--dropout",
+        str(_param("dropout")),
     ]
-    if use_tpu:
-        cmd.extend(
-            [
-                "--tpu",
-                "--num_processes",
-                str(_tpu_core_count()),
-                "--num_machines",
-                "1",
-                "--mixed_precision",
-                "bf16",
-                "--dynamo_backend",
-                "no",
-                "--main_training_function",
-                "main",
-            ]
-        )
-    cmd.extend(
-        [
-            "-m",
-            "ml.models.train",
-            "--base-model",
-            base_model,
-            "--train-zst",
-            str(cfg.train_shard),
-            "--valid-zst",
-            str(cfg.valid_shard),
-            "--out",
-            str(run_dir),
-            "--seq-len",
-            str(_param("seq_len")),
-            "--lr",
-            str(_param("lr")),
-            "--max-steps",
-            str(_param("max_steps")),
-            "--warmup-steps",
-            str(_param("warmup_steps")),
-            "--grad-accum",
-            str(_param("grad_accum")),
-            "--r",
-            str(_param("r")),
-            "--alpha",
-            str(_param("alpha")),
-            "--dropout",
-            str(_param("dropout")),
-        ]
-    )
 
     batch_size = _param("per_device_batch_size")
     if batch_size is not None:
-        cmd.extend(["--per-device-batch-size", str(batch_size)])
+        train_args.extend(["--per-device-batch-size", str(batch_size)])
 
     if trust_remote_code:
-        cmd.append("--trust-remote-code")
+        train_args.append("--trust-remote-code")
 
     if use_tpu:
-        cmd.append("--tpu")
+        train_args.append("--tpu")
     elif _param("load_in_4bit"):
-        cmd.append("--load-in-4bit")
+        train_args.append("--load-in-4bit")
 
     print(f"Training {cfg.language} → {run_dir}" + (" [TPU]" if use_tpu else ""))
-    subprocess.run(cmd, check=True, env=_child_env())
+    if use_tpu:
+        accel = _accelerate_executable()
+        multi_core_cmd = [
+            accel,
+            "launch",
+            "--tpu",
+            "--num_processes",
+            str(_tpu_core_count()),
+            "--num_machines",
+            "1",
+            "--mixed_precision",
+            "bf16",
+            "--dynamo_backend",
+            "no",
+            "--main_training_function",
+            "main",
+            "-m",
+            "ml.models.train",
+            *train_args,
+        ]
+        single_core_cmd = [
+            sys.executable,
+            "-m",
+            "ml.models.train",
+            *train_args,
+        ]
+
+        prefer_single_core = os.environ.get("POLYGLOT_TPU_SINGLE_CORE", "") == "1"
+        primary_cmd = single_core_cmd if prefer_single_core else multi_core_cmd
+        fallback_cmd = multi_core_cmd if prefer_single_core else single_core_cmd
+
+        result = subprocess.run(primary_cmd, check=False, env=_child_env())
+        if result.returncode != 0:
+            print("Primary TPU launch failed. Retrying with alternate TPU mode.")
+            subprocess.run(fallback_cmd, check=True, env=_child_env())
+    else:
+        cmd = [
+            _accelerate_executable(),
+            "launch",
+            "-m",
+            "ml.models.train",
+            *train_args,
+        ]
+        subprocess.run(cmd, check=True, env=_child_env())
 
 
 def cmd_eval(args: argparse.Namespace) -> None:

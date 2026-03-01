@@ -67,7 +67,7 @@ def main() -> None:
         # TPU: bf16, no quantization
         model = AutoModelForCausalLM.from_pretrained(
             a.base_model,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             trust_remote_code=a.trust_remote_code,
         )
     elif a.load_in_4bit:
@@ -90,7 +90,7 @@ def main() -> None:
     else:
         model = AutoModelForCausalLM.from_pretrained(
             a.base_model,
-            torch_dtype="auto",
+            dtype="auto",
             trust_remote_code=a.trust_remote_code,
         )
 

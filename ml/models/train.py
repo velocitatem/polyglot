@@ -178,7 +178,7 @@ def _load_model_gpu(
     else:
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
-            torch_dtype="auto",
+            dtype="auto",
             trust_remote_code=trust_remote_code,
         )
     return model
@@ -188,7 +188,7 @@ def _load_model_tpu(base_model: str, trust_remote_code: bool):
     """Load model for TPU training (bf16, no quantization, no device_map)."""
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=trust_remote_code,
     )
     return model
