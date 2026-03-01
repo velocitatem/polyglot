@@ -12,6 +12,7 @@ with deduplication via blake2b hashing.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
@@ -37,6 +38,17 @@ TEXT_KEYS = (
     "utterance",
     "prompt",
     "completion",
+)
+
+MIN_DOC_CHARS = 8
+
+# Common text-like keys in tabular speech corpora
+TABULAR_TEXT_KEYS = TEXT_KEYS + (
+    "sentence_norm",
+    "normalized_text",
+    "transcription",
+    "transcript_raw",
+    "translation",
 )
 
 
@@ -77,6 +89,39 @@ def _iter_txt_docs(p: Path) -> Iterator[str]:
         yield "\n".join(buf).strip()
 
 
+def _iter_delimited_docs(p: Path, delimiter: str) -> Iterator[str]:
+    with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        for row in reader:
+            if not row:
+                continue
+
+            # Direct key lookup first
+            text = None
+            for k in TABULAR_TEXT_KEYS:
+                v = row.get(k)
+                if isinstance(v, str) and len(v.strip()) >= MIN_DOC_CHARS:
+                    text = v.strip()
+                    break
+
+            if text is not None:
+                yield text
+                continue
+
+            # Case-insensitive fallback
+            lower_row = {
+                (k.lower() if isinstance(k, str) else k): v for k, v in row.items()
+            }
+            for k in TABULAR_TEXT_KEYS:
+                v = lower_row.get(k.lower())
+                if isinstance(v, str) and len(v.strip()) >= MIN_DOC_CHARS:
+                    text = v.strip()
+                    break
+
+            if text is not None:
+                yield text
+
+
 def _iter_text_records(root: Path) -> Iterator[str]:
     for fp in root.rglob("*"):
         if not fp.is_file():
@@ -84,6 +129,10 @@ def _iter_text_records(root: Path) -> Iterator[str]:
         suf = fp.suffix.lower()
         if suf in {".txt", ".md"}:
             yield from _iter_txt_docs(fp)
+        elif suf == ".tsv":
+            yield from _iter_delimited_docs(fp, delimiter="\t")
+        elif suf == ".csv":
+            yield from _iter_delimited_docs(fp, delimiter=",")
         elif suf == ".jsonl":
             for ln in fp.read_text(encoding="utf-8", errors="ignore").splitlines():
                 try:
@@ -92,7 +141,7 @@ def _iter_text_records(root: Path) -> Iterator[str]:
                     continue
                 for k in TEXT_KEYS:
                     v = obj.get(k)
-                    if isinstance(v, str) and len(v) >= 20:
+                    if isinstance(v, str) and len(v) >= MIN_DOC_CHARS:
                         yield v
                         break
         elif suf == ".json":
@@ -105,7 +154,7 @@ def _iter_text_records(root: Path) -> Iterator[str]:
                     if isinstance(it, dict):
                         for k in TEXT_KEYS:
                             v = it.get(k)
-                            if isinstance(v, str) and len(v) >= 20:
+                            if isinstance(v, str) and len(v) >= MIN_DOC_CHARS:
                                 yield v
                                 break
 
@@ -121,7 +170,7 @@ def _iter_custom_sources(cfg: LangConfig) -> Iterator[str]:
                 continue
             for k in TEXT_KEYS:
                 v = obj.get(k)
-                if isinstance(v, str) and len(v) >= 20:
+                if isinstance(v, str) and len(v) >= MIN_DOC_CHARS:
                     yield v
                     break
 
@@ -221,10 +270,12 @@ def build_shards(cfg: LangConfig, valid_permille: int = 5) -> tuple[int, int]:
     valid_cctx = zstd.ZstdCompressor(level=10)
     train_n = 0
     valid_n = 0
+    train_tmp = cfg.data_dir / "train.jsonl.zst.tmp"
+    valid_tmp = cfg.data_dir / "valid.jsonl.zst.tmp"
 
     with (
-        cfg.train_shard.open("wb") as tf,
-        cfg.valid_shard.open("wb") as vf,
+        train_tmp.open("wb") as tf,
+        valid_tmp.open("wb") as vf,
         train_cctx.stream_writer(tf) as tw,
         valid_cctx.stream_writer(vf) as vw,
     ):
@@ -255,6 +306,19 @@ def build_shards(cfg: LangConfig, valid_permille: int = 5) -> tuple[int, int]:
     db.commit()
     db.close()
 
+    had_existing = cfg.train_shard.exists() or cfg.valid_shard.exists()
+    if train_n == 0 and valid_n == 0 and had_existing:
+        # Preserve existing shards when a rebuild finds no usable records.
+        if train_tmp.exists():
+            train_tmp.unlink()
+        if valid_tmp.exists():
+            valid_tmp.unlink()
+        old_stats = compute_stats(cfg)
+        return old_stats["train_docs"], old_stats["valid_docs"]
+
+    train_tmp.replace(cfg.train_shard)
+    valid_tmp.replace(cfg.valid_shard)
+
     # Write stats
     stats = {"train_docs": train_n, "valid_docs": valid_n}
     cfg.stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
@@ -273,7 +337,7 @@ def _write_doc(
 ) -> tuple[int, int]:
     """Dedup, hash-split, and write a single document. Returns (train_added, valid_added)."""
     text = text.strip()
-    if len(text) < 40:
+    if len(text) < MIN_DOC_CHARS:
         return 0, 0
     h = hashlib.blake2b(text.encode("utf-8", errors="ignore"), digest_size=16).digest()
     if not _seen_insert(db, h):

@@ -60,6 +60,7 @@ def cmd_build(args: argparse.Namespace) -> None:
             f"No local MDC downloads found for {cfg.language}. "
             f"Run: python -m polyglot download --lang {args.lang}"
         )
+        sys.exit(1)
 
     train_n, valid_n = build_shards(cfg)
     print(f"{cfg.language}: {train_n} train + {valid_n} valid docs")
