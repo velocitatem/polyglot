@@ -539,9 +539,7 @@ def main() -> None:
     p.add_argument("--lang", type=str, required=True)
     p.add_argument("--base-model", type=str, default=None)
     p.add_argument("--run-tag", type=str, default=None)
-    p.add_argument(
-        "--tpu", action="store_true", help="Use TPU (bf16, no quantization, FSDP)"
-    )
+    p.add_argument("--tpu", action="store_true", help="Use TPU (bf16, no quantization)")
 
     # eval
     p = sp.add_parser("eval", help="Evaluate trained adapter")

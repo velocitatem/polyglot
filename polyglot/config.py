@@ -55,10 +55,10 @@ TRAINING_DEFAULTS = {
 TRAINING_DEFAULTS_TPU = {
     **TRAINING_DEFAULTS,
     "load_in_4bit": False,  # no bitsandbytes on TPU
-    "per_device_batch_size": 8,  # TPU v3 has 16GB HBM per core
-    "grad_accum": 2,  # effective batch = 8 cores * 8 * 2 = 128
+    "per_device_batch_size": 1,  # safer default for 7B-class models on TPU
+    "grad_accum": 16,  # effective batch = 8 cores * 1 * 16 = 128
     "dropout": 0.0,  # avoid non-deterministic dropout on XLA
-    "lr": 3e-4,  # slightly higher LR for larger effective batch
+    "lr": 2e-4,
 }
 
 

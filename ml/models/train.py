@@ -7,7 +7,7 @@ Uses PEFT LoRA targeting all attention + MLP projections.
 
 Supports:
   - GPU with optional 4-bit QLoRA (bitsandbytes)
-  - TPU via torch_xla (bf16, no quantization, FSDP via accelerate)
+  - TPU via torch_xla (bf16, no quantization)
 """
 
 from __future__ import annotations
@@ -323,18 +323,8 @@ def main() -> None:
         "dataloader_drop_last": use_tpu,  # TPU requires uniform batch shapes
     }
 
-    # TPU-specific: FSDP for multi-core sharding
     if use_tpu:
-        ta_kwargs["fsdp"] = "full_shard auto_wrap"
-        ta_kwargs["fsdp_config"] = {
-            "fsdp_transformer_layer_cls_to_wrap": [
-                "LlamaDecoderLayer",
-                "GemmaDecoderLayer",
-                "MistralDecoderLayer",
-                "GPT2Block",
-                "FalconDecoderLayer",
-            ],
-        }
+        ta_kwargs["gradient_checkpointing"] = True
 
     ta_params = inspect.signature(TrainingArguments.__init__).parameters
     if "eval_strategy" in ta_params:
