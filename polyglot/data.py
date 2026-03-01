@@ -218,7 +218,16 @@ def download_mdc(
     cfg: LangConfig, limit: int = 100, max_total_gb: float | None = None
 ) -> int:
     """Download MDC archives for a language. Returns number of datasets downloaded."""
-    from datacollective import save_dataset_to_disk
+    try:
+        from datacollective import save_dataset_to_disk
+    except ImportError:
+        try:
+            from datacollective.download import save_dataset_to_disk
+        except ImportError as e:
+            raise ImportError(
+                "datacollective does not expose save_dataset_to_disk in this environment. "
+                "Install a compatible datacollective version (>=0.4.0) or adjust Python version."
+            ) from e
 
     raw_dir = cfg.data_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)

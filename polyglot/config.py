@@ -14,7 +14,7 @@ Each language lives in langs/<code>/lang.yaml with this structure:
           track: cc0_pd
       custom: []
     training:
-      base_model: mistralai/Ministral-3-14B-Base-2512
+      base_model: mistralai/Mistral-7B-v0.3
       seq_len: 2048
       lr: 0.0002
       max_steps: 5000
@@ -37,7 +37,7 @@ import yaml
 LANGS_ROOT = Path("langs")
 
 TRAINING_DEFAULTS = {
-    "base_model": "mistralai/Ministral-3-14B-Base-2512",
+    "base_model": "mistralai/Mistral-7B-v0.3",
     "seq_len": 2048,
     "lr": 2e-4,
     "max_steps": 5000,
@@ -47,6 +47,7 @@ TRAINING_DEFAULTS = {
     "r": 32,
     "alpha": 64,
     "dropout": 0.05,
+    "trust_remote_code": False,
     "load_in_4bit": True,
 }
 

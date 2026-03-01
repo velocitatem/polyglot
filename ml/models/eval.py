@@ -51,18 +51,24 @@ def main() -> None:
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--batches", type=int, default=200)
     ap.add_argument("--load-in-4bit", action="store_true")
+    ap.add_argument("--trust-remote-code", action="store_true")
     ap.add_argument("--tpu", action="store_true", help="Force TPU mode")
     a = ap.parse_args()
 
     use_tpu = a.tpu or _is_tpu()
 
-    tok = AutoTokenizer.from_pretrained(a.base_model, use_fast=True)
+    tok = AutoTokenizer.from_pretrained(
+        a.base_model,
+        use_fast=True,
+        trust_remote_code=a.trust_remote_code,
+    )
 
     if use_tpu:
         # TPU: bf16, no quantization
         model = AutoModelForCausalLM.from_pretrained(
             a.base_model,
             torch_dtype=torch.bfloat16,
+            trust_remote_code=a.trust_remote_code,
         )
     elif a.load_in_4bit:
         from transformers import BitsAndBytesConfig
@@ -79,9 +85,14 @@ def main() -> None:
             a.base_model,
             quantization_config=quant_cfg,
             device_map="auto",
+            trust_remote_code=a.trust_remote_code,
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(a.base_model, torch_dtype="auto")
+        model = AutoModelForCausalLM.from_pretrained(
+            a.base_model,
+            torch_dtype="auto",
+            trust_remote_code=a.trust_remote_code,
+        )
 
     model = PeftModel.from_pretrained(model, a.adapter)
     device = _get_device(use_tpu)

@@ -142,7 +142,11 @@ def _infer_target_modules(model) -> list[str]:
 
 
 def _load_model_gpu(
-    base_model: str, load_in_4bit: bool, out_dir: Path, max_gpu_mem_gb: int | None
+    base_model: str,
+    load_in_4bit: bool,
+    out_dir: Path,
+    max_gpu_mem_gb: int | None,
+    trust_remote_code: bool,
 ):
     """Load model for GPU training (optional 4-bit quantization)."""
     if load_in_4bit:
@@ -168,18 +172,24 @@ def _load_model_gpu(
             device_map="auto",
             max_memory=max_memory,
             offload_folder=str(out_dir / "offload"),
+            trust_remote_code=trust_remote_code,
         )
         model = prepare_model_for_kbit_training(model)
     else:
-        model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype="auto")
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            torch_dtype="auto",
+            trust_remote_code=trust_remote_code,
+        )
     return model
 
 
-def _load_model_tpu(base_model: str):
+def _load_model_tpu(base_model: str, trust_remote_code: bool):
     """Load model for TPU training (bf16, no quantization, no device_map)."""
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
+        trust_remote_code=trust_remote_code,
     )
     return model
 
@@ -201,6 +211,7 @@ def main() -> None:
     ap.add_argument("--dropout", type=float, default=0.05)
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--max-gpu-mem-gb", type=int, default=None)
+    ap.add_argument("--trust-remote-code", action="store_true")
     ap.add_argument(
         "--tpu",
         action="store_true",
@@ -241,7 +252,11 @@ def main() -> None:
         dropout=a.dropout,
     )
 
-    tok = AutoTokenizer.from_pretrained(cfg.base_model, use_fast=True)
+    tok = AutoTokenizer.from_pretrained(
+        cfg.base_model,
+        use_fast=True,
+        trust_remote_code=a.trust_remote_code,
+    )
     if tok.pad_token_id is None and tok.eos_token_id is not None:
         tok.pad_token_id = tok.eos_token_id
 
@@ -249,10 +264,26 @@ def main() -> None:
     valid_ds = ZstJsonlPacked(a.valid_zst, tok, cfg.seq_len)
 
     # Load model
-    if use_tpu:
-        model = _load_model_tpu(cfg.base_model)
-    else:
-        model = _load_model_gpu(cfg.base_model, a.load_in_4bit, a.out, a.max_gpu_mem_gb)
+    try:
+        if use_tpu:
+            model = _load_model_tpu(cfg.base_model, a.trust_remote_code)
+        else:
+            model = _load_model_gpu(
+                cfg.base_model,
+                a.load_in_4bit,
+                a.out,
+                a.max_gpu_mem_gb,
+                a.trust_remote_code,
+            )
+    except ValueError as e:
+        msg = str(e)
+        if "Unrecognized configuration class" in msg:
+            raise ValueError(
+                f"Base model '{cfg.base_model}' is not supported by AutoModelForCausalLM in this setup. "
+                "Use a supported causal Mistral model such as 'mistralai/Mistral-7B-v0.3' "
+                "or pass --trust-remote-code if the model requires custom code."
+            ) from e
+        raise
 
     # LoRA config — dropout=0 on TPU avoids non-deterministic ops
     lora = LoraConfig(

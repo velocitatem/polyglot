@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
 
 from polyglot.config import LangConfig, LANGS_ROOT
+
+
+UNSUPPORTED_BASE_MODELS = {
+    "mistralai/Ministral-3-14B-Base-2512": "mistralai/Mistral-7B-v0.3",
+}
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -99,7 +105,10 @@ def cmd_train(args: argparse.Namespace) -> None:
             return TRAINING_DEFAULTS_TPU.get(key, cfg.training_param(key))
         return cfg.training_param(key)
 
-    base_model = args.base_model or _param("base_model")
+    base_model = _resolve_base_model(
+        args.base_model or _param("base_model"), args.base_model is not None
+    )
+    trust_remote_code = bool(_param("trust_remote_code"))
     run_tag = args.run_tag or _auto_run_tag()
     run_dir = cfg.runs_dir / run_tag
 
@@ -131,7 +140,17 @@ def cmd_train(args: argparse.Namespace) -> None:
         "launch",
     ]
     if use_tpu:
-        cmd.extend(["--tpu", "--num_processes", str(_tpu_core_count())])
+        cmd.extend(
+            [
+                "--tpu",
+                "--num_processes",
+                str(_tpu_core_count()),
+                "--mixed_precision",
+                "bf16",
+                "--main_training_function",
+                "main",
+            ]
+        )
     cmd.extend(
         [
             "-m",
@@ -167,13 +186,16 @@ def cmd_train(args: argparse.Namespace) -> None:
     if batch_size is not None:
         cmd.extend(["--per-device-batch-size", str(batch_size)])
 
+    if trust_remote_code:
+        cmd.append("--trust-remote-code")
+
     if use_tpu:
         cmd.append("--tpu")
     elif _param("load_in_4bit"):
         cmd.append("--load-in-4bit")
 
     print(f"Training {cfg.language} → {run_dir}" + (" [TPU]" if use_tpu else ""))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_child_env())
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
@@ -185,7 +207,10 @@ def cmd_eval(args: argparse.Namespace) -> None:
     use_tpu = getattr(args, "tpu", False)
     if use_tpu:
         _ensure_tpu_runtime()
-    base_model = args.base_model or cfg.training_param("base_model")
+    base_model = _resolve_base_model(
+        args.base_model or cfg.training_param("base_model"), args.base_model is not None
+    )
+    trust_remote_code = bool(cfg.training_param("trust_remote_code"))
     run_tag = args.run_tag or _latest_run(cfg)
     if not run_tag:
         print(f"No runs found for {args.lang}")
@@ -218,6 +243,9 @@ def cmd_eval(args: argparse.Namespace) -> None:
         cmd.append("--tpu")
     elif cfg.training_param("load_in_4bit"):
         cmd.append("--load-in-4bit")
+
+    if trust_remote_code:
+        cmd.append("--trust-remote-code")
 
     print(f"Evaluating {cfg.language} run={run_tag}" + (" [TPU]" if use_tpu else ""))
     subprocess.run(cmd, check=True)
@@ -454,6 +482,27 @@ def _ensure_tpu_runtime() -> None:
                 "  3) If it still fails, install a torch/torch_xla pair built for your VM image"
             )
         sys.exit(1)
+
+
+def _child_env() -> dict[str, str]:
+    """Child env with repo root available on PYTHONPATH for launchers."""
+    env = os.environ.copy()
+    cwd = str(Path.cwd())
+    py_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = cwd if not py_path else f"{cwd}:{py_path}"
+    return env
+
+
+def _resolve_base_model(base_model: str, is_explicit: bool) -> str:
+    """Swap known incompatible defaults unless user explicitly requested them."""
+    fallback = UNSUPPORTED_BASE_MODELS.get(base_model)
+    if fallback and not is_explicit:
+        print(
+            "Configured base model is not compatible with current training loader. "
+            f"Using fallback: {fallback}"
+        )
+        return fallback
+    return base_model
 
 
 # ---------------------------------------------------------------------------
