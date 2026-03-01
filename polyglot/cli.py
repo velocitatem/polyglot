@@ -8,6 +8,7 @@ Usage:
     python -m polyglot build --lang XX
     python -m polyglot train --lang XX [--base-model ...]
     python -m polyglot eval --lang XX [--run-tag ...]
+    python -m polyglot migrate [--overwrite]
     python -m polyglot status [--lang XX | --all]
     python -m polyglot publish --lang XX --hf-repo ...
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -51,14 +53,35 @@ def cmd_build(args: argparse.Namespace) -> None:
     from polyglot.data import build_shards
 
     cfg = LangConfig.load(args.lang)
+    raw_done = len(list((cfg.data_dir / "raw").glob("*/.done")))
+    custom_jsonl = len(list(cfg.sources_dir.glob("*.jsonl")))
+    if raw_done == 0 and custom_jsonl == 0 and cfg.sources_mdc:
+        print(
+            f"No local MDC downloads found for {cfg.language}. "
+            f"Run: python -m polyglot download --lang {args.lang}"
+        )
+
     train_n, valid_n = build_shards(cfg)
     print(f"{cfg.language}: {train_n} train + {valid_n} valid docs")
+    if train_n == 0 and valid_n == 0:
+        errors = list((cfg.data_dir / "raw").glob("*/.error"))
+        if errors:
+            print(
+                f"Found {len(errors)} download error file(s) under {cfg.data_dir / 'raw'}; "
+                "check access/terms for those datasets."
+            )
+        else:
+            print(
+                "No valid text records found. Add custom JSONL in "
+                f"{cfg.sources_dir} or re-run download."
+            )
 
 
 def cmd_train(args: argparse.Namespace) -> None:
     """Run LoRA CPT training for a language."""
     import subprocess
     from polyglot.config import TRAINING_DEFAULTS_TPU
+    from polyglot.data import compute_stats
 
     cfg = LangConfig.load(args.lang)
     use_tpu = getattr(args, "tpu", False)
@@ -77,14 +100,31 @@ def cmd_train(args: argparse.Namespace) -> None:
     run_tag = args.run_tag or _auto_run_tag()
     run_dir = cfg.runs_dir / run_tag
 
-    if not cfg.train_shard.exists():
-        print(f"No training data. Run: python -m polyglot build --lang {args.lang}")
+    if not cfg.train_shard.exists() or not cfg.valid_shard.exists():
+        print(
+            "Missing train/valid shards. "
+            f"Run: python -m polyglot download --lang {args.lang} && "
+            f"python -m polyglot build --lang {args.lang}"
+        )
         sys.exit(1)
 
+    stats = compute_stats(cfg)
+    if stats.get("train_docs", 0) <= 0:
+        print(
+            f"No training docs for {args.lang}. "
+            f"Run: python -m polyglot download --lang {args.lang} then build."
+        )
+        sys.exit(1)
+    if stats.get("valid_docs", 0) <= 0:
+        print(
+            f"No validation docs for {args.lang}. "
+            "Training would be unstable; add more data and rebuild."
+        )
+        sys.exit(1)
+
+    accel = _accelerate_executable()
     cmd = [
-        sys.executable,
-        "-m",
-        "accelerate",
+        accel,
         "launch",
         "-m",
         "ml.models.train",
@@ -130,6 +170,7 @@ def cmd_train(args: argparse.Namespace) -> None:
 def cmd_eval(args: argparse.Namespace) -> None:
     """Evaluate a trained adapter."""
     import subprocess
+    from polyglot.data import compute_stats
 
     cfg = LangConfig.load(args.lang)
     use_tpu = getattr(args, "tpu", False)
@@ -140,6 +181,15 @@ def cmd_eval(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     run_dir = cfg.runs_dir / run_tag
+    stats = compute_stats(cfg)
+    if stats.get("valid_docs", 0) <= 0:
+        print(
+            f"No validation docs for {args.lang}. "
+            f"Run: python -m polyglot download --lang {args.lang} && "
+            f"python -m polyglot build --lang {args.lang}"
+        )
+        sys.exit(1)
+
     cmd = [
         sys.executable,
         "-m",
@@ -255,6 +305,85 @@ def cmd_publish(args: argparse.Namespace) -> None:
     subprocess.run(cmd, check=True)
 
 
+def cmd_migrate(args: argparse.Namespace) -> None:
+    """Migrate legacy normalized shards and runs into langs/<code>/ structure."""
+    from polyglot.data import compute_stats
+
+    legacy_norm_root = Path(args.legacy_normalized)
+    legacy_runs_root = Path(args.legacy_runs)
+
+    migrated_shards = 0
+    migrated_runs = 0
+
+    if legacy_norm_root.exists():
+        for track_dir in sorted(legacy_norm_root.glob("lang=*/track=*")):
+            lang_dir = track_dir.parent.name
+            if not lang_dir.startswith("lang="):
+                continue
+            lang = lang_dir.split("=", 1)[1]
+            try:
+                cfg = LangConfig.load(lang)
+            except Exception:
+                continue
+
+            src_train = track_dir / "train.jsonl.zst"
+            src_valid = track_dir / "valid.jsonl.zst"
+            if not src_train.exists() or not src_valid.exists():
+                continue
+
+            cfg.data_dir.mkdir(parents=True, exist_ok=True)
+            dst_train = cfg.train_shard
+            dst_valid = cfg.valid_shard
+
+            if not args.overwrite and dst_train.exists() and dst_valid.exists():
+                continue
+
+            shutil.copy2(src_train, dst_train)
+            shutil.copy2(src_valid, dst_valid)
+            compute_stats(cfg)
+            migrated_shards += 1
+
+    if legacy_runs_root.exists():
+        for run_dir in sorted(legacy_runs_root.glob("base=*/lang=*/track=*/*")):
+            if not run_dir.is_dir():
+                continue
+            parts = run_dir.parts
+            try:
+                base_raw = next(p for p in parts if p.startswith("base="))
+                lang_raw = next(p for p in parts if p.startswith("lang="))
+                track_raw = next(p for p in parts if p.startswith("track="))
+            except StopIteration:
+                continue
+
+            lang = lang_raw.split("=", 1)[1]
+            base = base_raw.split("=", 1)[1]
+            track = track_raw.split("=", 1)[1]
+
+            try:
+                cfg = LangConfig.load(lang)
+            except Exception:
+                continue
+
+            safe_base = base.replace("/", "_")
+            safe_track = track.replace("/", "_")
+            target_name = f"legacy-{safe_base}-{safe_track}-{run_dir.name}"
+            target_dir = cfg.runs_dir / target_name
+
+            if target_dir.exists() and not args.overwrite:
+                continue
+
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            if target_dir.exists() and args.overwrite:
+                shutil.rmtree(target_dir)
+            shutil.copytree(run_dir, target_dir)
+            migrated_runs += 1
+
+    print(
+        f"Migration complete: {migrated_shards} language shard set(s), "
+        f"{migrated_runs} run(s)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -275,6 +404,14 @@ def _latest_run(cfg: LangConfig) -> str | None:
         reverse=True,
     )
     return runs[0].name if runs else None
+
+
+def _accelerate_executable() -> str:
+    """Prefer accelerate in active venv; fallback to PATH."""
+    venv_accelerate = Path(sys.executable).with_name("accelerate")
+    if venv_accelerate.exists():
+        return str(venv_accelerate)
+    return "accelerate"
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +463,16 @@ def main() -> None:
     p = sp.add_parser("status", help="Show pipeline status")
     p.add_argument("--lang", type=str, default=None)
 
+    # migrate
+    p = sp.add_parser("migrate", help="Migrate legacy artifacts into langs/<code>")
+    p.add_argument(
+        "--legacy-normalized",
+        type=str,
+        default="ml/data/artifacts/normalized",
+    )
+    p.add_argument("--legacy-runs", type=str, default="ml/data/artifacts/runs")
+    p.add_argument("--overwrite", action="store_true")
+
     # publish
     p = sp.add_parser("publish", help="Publish adapter to HF Hub")
     p.add_argument("--lang", type=str, required=True)
@@ -339,6 +486,7 @@ def main() -> None:
         "build": cmd_build,
         "train": cmd_train,
         "eval": cmd_eval,
+        "migrate": cmd_migrate,
         "status": cmd_status,
         "publish": cmd_publish,
     }[a.cmd](a)

@@ -26,7 +26,7 @@ TPU_FLAG = $(if $(filter 1 true yes,$(TPU)),--tpu,)
 
 .PHONY: venv deps deps-tpu env-check \
         mdc-meta mdc-bins \
-        init init-all download build train eval status publish \
+        init init-all download build train eval status publish migrate \
         run viz clean
 
 # ── Setup ─────────────────────────────────────────────────────────
@@ -81,6 +81,9 @@ publish: deps
 	@test -n "$(L)" || (echo "L is required"; exit 1)
 	@test -n "$(HF_REPO)" || (echo "HF_REPO is required"; exit 1)
 	$(PY) -m polyglot publish --lang $(L) --hf-repo $(HF_REPO) $(if $(RUN_TAG),--run-tag $(RUN_TAG),)
+
+migrate: deps
+	$(PY) -m polyglot migrate
 
 # ── Convenience ───────────────────────────────────────────────────
 run: download build train eval
